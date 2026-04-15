@@ -1,0 +1,10 @@
+name: uscrs_shiny
+title:
+username: healthallocate
+account: healthallocate
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16159637
+bundleId: 11227129
+url: https://healthallocate.shinyapps.io/uscrs_shiny/
+version: 1
