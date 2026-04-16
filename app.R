@@ -169,6 +169,26 @@ app_css <- HTML("
   .accordion-button:not(.collapsed) {
     background-color: #eaf2fb; color: #1f4f85;
   }
+
+  /* Mobile responsive tweaks */
+  @media (max-width: 576px) {
+    .navbar-brand { font-size: 1rem; }
+    .bslib-value-box .value-box-value { font-size: 2.2rem; }
+    .bslib-value-box .value-box-title { font-size: 0.9rem; }
+    .card-header { padding: 0.6rem 0.8rem; font-size: 0.95rem; }
+    .card-body { padding: 0.8rem; }
+    .tier-chip { font-size: 0.75rem; padding: 2px 8px; }
+    .sidebar-title { font-size: 1rem; }
+  }
+
+  /* Card header that wraps title + subtitle */
+  .card-header-wrap {
+    display: flex; flex-wrap: wrap; align-items: baseline;
+    gap: 4px 10px;
+  }
+  .card-header-sub {
+    font-weight: 400; font-size: 0.8rem; color: #888;
+  }
 ")
 
 # ---- UI ---------------------------------------------------------------------
@@ -283,16 +303,14 @@ ui <- page_navbar(
       card(
         full_screen = FALSE,
         card_header(
-          tagList(
-            bs_icon("bar-chart-line"), " Score Drivers",
-            tags$span(
-              "vs. typical reference patient",
-              style = "font-weight:400; font-size:0.8rem; color:#888; margin-left:8px;"
-            )
+          div(
+            class = "card-header-wrap",
+            span(bs_icon("bar-chart-line"), " Score Drivers"),
+            span("vs. typical reference patient", class = "card-header-sub")
           )
         ),
         card_body(
-          plotOutput("drivers", height = "280px"),
+          plotOutput("drivers", height = "320px"),
           p(
             tags$em("Bars show how each variable shifts the raw score relative to a ",
                     "reference patient with typical values (albumin 4.0, bilirubin 1.0, ",
@@ -461,10 +479,22 @@ server <- function(input, output, session) {
   output$gauge <- renderPlot({
     score <- tryCatch(manual_score(), error = function(e) NA_integer_)
 
-    grad <- data.frame(
-      x = seq(0, 49.8, by = 0.2)
+    plot_w <- tryCatch(
+      session$clientData[[paste0("output_gauge_width")]],
+      error = function(e) NULL
     )
+    is_narrow <- !is.null(plot_w) && plot_w < 520
+
+    grad <- data.frame(x = seq(0, 49.8, by = 0.2))
     grad$xend <- grad$x + 0.2
+
+    x_breaks   <- if (is_narrow) seq(0, 50, by = 10) else seq(0, 50, by = 5)
+    xtext_size <- if (is_narrow) 10 else 12
+    xtitle_sz  <- if (is_narrow) 11 else 13
+    label_size <- if (is_narrow) 3.6 else 4.4
+
+    # Clamp the "Score: N" label position so it stays inside the panel
+    label_x <- if (!is.na(score)) max(4, min(46, score)) else NA_real_
 
     p <- ggplot() +
       geom_rect(
@@ -476,7 +506,7 @@ server <- function(input, output, session) {
         colors = c("#2a9d8f", "#8ab17d", "#e9c46a", "#f4a261", "#e76f51"),
         limits = c(0, 50)
       ) +
-      scale_x_continuous(breaks = seq(0, 50, by = 5),
+      scale_x_continuous(breaks = x_breaks,
                          limits = c(-1, 51), expand = c(0, 0)) +
       scale_y_continuous(limits = c(-0.3, 1.9), expand = c(0, 0)) +
       labs(x = "US-CRS Score", y = NULL) +
@@ -486,8 +516,8 @@ server <- function(input, output, session) {
         panel.grid = element_blank(),
         axis.ticks.y = element_blank(),
         axis.text.y = element_blank(),
-        axis.text.x = element_text(size = 12, color = "#444"),
-        axis.title.x = element_text(size = 13, color = "#333",
+        axis.text.x = element_text(size = xtext_size, color = "#444"),
+        axis.title.x = element_text(size = xtitle_sz, color = "#333",
                                     margin = margin(t = 10)),
         plot.margin = margin(10, 10, 5, 10)
       )
@@ -500,9 +530,9 @@ server <- function(input, output, session) {
         annotate("point", x = score, y = 1.35,
                  shape = 25, size = 5,
                  fill = "#111", color = "#111") +
-        annotate("label", x = score, y = 1.72,
+        annotate("label", x = label_x, y = 1.72,
                  label = paste0("Score: ", score),
-                 size = 4.4, fontface = "bold",
+                 size = label_size, fontface = "bold",
                  color = "#111", fill = "white",
                  label.size = 0.4, label.r = unit(0.25, "lines"))
     }
@@ -542,41 +572,67 @@ server <- function(input, output, session) {
       )
     }
 
-    # Convert to percentage of total absolute deviation, preserving direction
+    # Narrow-screen (mobile) adjustments
+    plot_w <- tryCatch(
+      session$clientData[[paste0("output_drivers_width")]],
+      error = function(e) NULL
+    )
+    is_narrow <- !is.null(plot_w) && plot_w < 520
+
+    # Convert to percentage of total absolute deviation
     total_abs <- sum(abs(contribs$contribution))
     contribs <- contribs %>%
       mutate(
         pct       = (contribution / total_abs) * 100,
         direction = ifelse(contribution > 0, "Risk-increasing", "Protective"),
-        variable  = reorder(variable, abs(pct))
+        variable  = reorder(variable, abs(pct)),
+        label     = paste0(round(abs(pct)), "%"),
+        inside    = abs(pct) >= 12,
+        label_y   = ifelse(inside, pct / 2, pct),
+        label_hjust = case_when(
+          inside       ~ 0.5,
+          pct >= 0     ~ -0.2,
+          TRUE         ~ 1.2
+        ),
+        label_color = ifelse(inside, "white", "#333")
       )
+
+    label_size <- if (is_narrow) 3.2 else 3.8
+    ytitle_size <- if (is_narrow) 10 else 11
+    ytext_size  <- if (is_narrow) 9  else 10
+    xtext_size  <- if (is_narrow) 10 else 11
 
     ggplot(contribs, aes(x = variable, y = pct, fill = direction)) +
       geom_col(width = 0.65) +
       geom_hline(yintercept = 0, linewidth = 0.5, color = "#333") +
       geom_text(
-        aes(label = paste0(ifelse(pct >= 0, "+", ""),
-                           round(abs(pct)), "%"),
-            hjust = ifelse(pct >= 0, -0.15, 1.15)),
-        size = 3.8, fontface = "bold", color = "#333"
+        aes(y = label_y, label = label,
+            hjust = label_hjust, color = label_color),
+        size = label_size, fontface = "bold", show.legend = FALSE
       ) +
       coord_flip(clip = "off") +
       scale_fill_manual(
         values = c("Risk-increasing" = "#e76f51", "Protective" = "#2a9d8f"),
+        labels = c("Risk-increasing" = "Risk \u2191",
+                   "Protective"      = "Protective"),
         name = NULL
       ) +
-      labs(x = NULL, y = "Share of score deviation from reference (%)") +
+      scale_color_identity() +
+      scale_y_continuous(expand = expansion(mult = c(0.1, 0.1))) +
+      labs(x = NULL, y = "% of score deviation") +
       theme_minimal(base_size = 13) +
       theme(
         legend.position = "top",
-        legend.text = element_text(size = 11),
+        legend.text = element_text(size = if (is_narrow) 10 else 11),
+        legend.margin = margin(b = 2),
         panel.grid.major.y = element_blank(),
         panel.grid.minor = element_blank(),
-        axis.text.y = element_text(size = 11, color = "#333", face = "bold"),
-        axis.text.x = element_text(size = 10, color = "#555"),
-        axis.title.x = element_text(size = 11, color = "#555",
+        axis.text.y = element_text(size = xtext_size, color = "#333",
+                                    face = "bold", lineheight = 0.85),
+        axis.text.x = element_text(size = ytext_size, color = "#555"),
+        axis.title.x = element_text(size = ytitle_size, color = "#555",
                                     margin = margin(t = 8)),
-        plot.margin = margin(5, 20, 5, 5)
+        plot.margin = margin(5, 15, 5, 5)
       )
   }, res = 96)
 
