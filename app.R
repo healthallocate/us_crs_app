@@ -530,11 +530,7 @@ server <- function(input, output, session) {
     if (is.null(contribs)) return(NULL)
 
     contribs <- contribs %>%
-      filter(abs(contribution) > 0.001) %>%
-      mutate(
-        direction = ifelse(contribution > 0, "Risk-increasing", "Protective"),
-        variable  = reorder(variable, abs(contribution))
-      )
+      filter(abs(contribution) > 0.001)
 
     if (nrow(contribs) == 0) {
       return(
@@ -546,12 +542,22 @@ server <- function(input, output, session) {
       )
     }
 
-    ggplot(contribs, aes(x = variable, y = contribution, fill = direction)) +
+    # Convert to percentage of total absolute deviation, preserving direction
+    total_abs <- sum(abs(contribs$contribution))
+    contribs <- contribs %>%
+      mutate(
+        pct       = (contribution / total_abs) * 100,
+        direction = ifelse(contribution > 0, "Risk-increasing", "Protective"),
+        variable  = reorder(variable, abs(pct))
+      )
+
+    ggplot(contribs, aes(x = variable, y = pct, fill = direction)) +
       geom_col(width = 0.65) +
       geom_hline(yintercept = 0, linewidth = 0.5, color = "#333") +
       geom_text(
-        aes(label = sprintf("%+.2f", contribution),
-            hjust = ifelse(contribution >= 0, -0.15, 1.15)),
+        aes(label = paste0(ifelse(pct >= 0, "+", ""),
+                           round(abs(pct)), "%"),
+            hjust = ifelse(pct >= 0, -0.15, 1.15)),
         size = 3.8, fontface = "bold", color = "#333"
       ) +
       coord_flip(clip = "off") +
@@ -559,7 +565,7 @@ server <- function(input, output, session) {
         values = c("Risk-increasing" = "#e76f51", "Protective" = "#2a9d8f"),
         name = NULL
       ) +
-      labs(x = NULL, y = "Contribution to raw score (vs. reference)") +
+      labs(x = NULL, y = "Share of score deviation from reference (%)") +
       theme_minimal(base_size = 13) +
       theme(
         legend.position = "top",
