@@ -75,6 +75,61 @@ compute_uscrs <- function(df) {
     )
 }
 
+# Reference patient values for contribution analysis
+# Clinically typical values for a heart failure patient on the waitlist
+REF_ALBUMIN    <- 4.0    # g/dL (normal)
+REF_BILIRUBIN  <- 1.0    # mg/dL (upper normal)
+REF_CREATININE <- 1.0    # mg/dL (normal)
+REF_SODIUM     <- 138    # mEq/L (normal)
+REF_AGE        <- 50     # years
+REF_BNP_REG    <- 150    # pg/mL (moderate for regular BNP)
+REF_BNP_NTPRO  <- 900    # pg/mL (comparable for NT-pro BNP)
+
+# Compute each variable's contribution to the raw score relative to
+# a reference patient with typical values. Positive = risk-increasing,
+# negative = protective.
+compute_contributions <- function(albumin, bilirubin, sex, age, creatinine,
+                                  sodium, LVAD, short_MCS_ever, BNP_NT_Pro, BNP) {
+  # Patient eGFR
+  patient_eGFR <- if (sex == 1) {
+    142 * (pmin((creatinine / 0.7), 1)^(-0.241)) *
+      (pmax((creatinine / 0.7), 1)^(-1.2)) * 0.9938^(age) * 1.012
+  } else {
+    142 * (pmin((creatinine / 0.9), 1)^(-0.302)) *
+      (pmax((creatinine / 0.7), 1)^(-1.2)) * 0.9938^(age)
+  }
+
+  # Reference eGFR (same sex, reference age & creatinine)
+  ref_eGFR <- if (sex == 1) {
+    142 * (pmin((REF_CREATININE / 0.7), 1)^(-0.241)) *
+      (pmax((REF_CREATININE / 0.7), 1)^(-1.2)) * 0.9938^(REF_AGE) * 1.012
+  } else {
+    142 * (pmin((REF_CREATININE / 0.9), 1)^(-0.302)) *
+      (pmax((REF_CREATININE / 0.7), 1)^(-1.2)) * 0.9938^(REF_AGE)
+  }
+
+  # BNP contribution (same assay type for fair comparison)
+  ref_BNP <- if (BNP_NT_Pro == 1) REF_BNP_NTPRO else REF_BNP_REG
+  bnp_reg <- if (BNP_NT_Pro != 1) 1 else 0
+  patient_bnp_term <- 0.40 * log(BNP) * bnp_reg + 0.20 * log(BNP) * BNP_NT_Pro
+  ref_bnp_term     <- 0.40 * log(ref_BNP) * bnp_reg + 0.20 * log(ref_BNP) * BNP_NT_Pro
+
+  data.frame(
+    variable = c("Albumin", "Bilirubin", "Kidney Function\n(eGFR)",
+                  "Sodium", "BNP", "LVAD", "Short-term MCS"),
+    contribution = c(
+      -0.63 * (albumin - REF_ALBUMIN),
+       0.55 * (log(bilirubin + 1) - log(REF_BILIRUBIN + 1)),
+      -0.01 * (patient_eGFR - ref_eGFR),
+      -0.07 * (sodium - REF_SODIUM),
+      patient_bnp_term - ref_bnp_term,
+      -1.12 * (LVAD - 0),
+       1.02 * (short_MCS_ever - 0)
+    ),
+    stringsAsFactors = FALSE
+  )
+}
+
 # ---- Theme ------------------------------------------------------------------
 
 app_theme <- bs_theme(
@@ -222,6 +277,28 @@ ui <- page_navbar(
         card_body(
           min_height = 210,
           plotOutput("gauge", height = "180px")
+        )
+      ),
+
+      card(
+        full_screen = FALSE,
+        card_header(
+          tagList(
+            bs_icon("bar-chart-line"), " Score Drivers",
+            tags$span(
+              "vs. typical reference patient",
+              style = "font-weight:400; font-size:0.8rem; color:#888; margin-left:8px;"
+            )
+          )
+        ),
+        card_body(
+          plotOutput("drivers", height = "280px"),
+          p(
+            tags$em("Bars show how each variable shifts the raw score relative to a ",
+                    "reference patient with typical values (albumin 4.0, bilirubin 1.0, ",
+                    "creatinine 1.0, sodium 138, no devices, moderate BNP)."),
+            style = "font-size:0.8rem; color:#777; margin-top:8px; margin-bottom:0;"
+          )
         )
       ),
 
@@ -430,6 +507,71 @@ server <- function(input, output, session) {
                  label.size = 0.4, label.r = unit(0.25, "lines"))
     }
     p
+  }, res = 96)
+
+  # Variable contribution analysis
+  manual_contributions <- reactive({
+    compute_contributions(
+      albumin        = input$albumin,
+      bilirubin      = input$bilirubin,
+      sex            = as.numeric(input$sex),
+      age            = input$age,
+      creatinine     = input$creatinine,
+      sodium         = input$sodium,
+      LVAD           = as.numeric(input$lvad),
+      short_MCS_ever = as.numeric(input$short_term_MCS),
+      BNP_NT_Pro     = as.numeric(input$BNP_type),
+      BNP            = exp(input$BNP_value)
+    )
+  })
+
+  output$drivers <- renderPlot({
+    contribs <- tryCatch(manual_contributions(), error = function(e) NULL)
+    if (is.null(contribs)) return(NULL)
+
+    contribs <- contribs %>%
+      filter(abs(contribution) > 0.001) %>%
+      mutate(
+        direction = ifelse(contribution > 0, "Risk-increasing", "Protective"),
+        variable  = reorder(variable, abs(contribution))
+      )
+
+    if (nrow(contribs) == 0) {
+      return(
+        ggplot() +
+          annotate("text", x = 0.5, y = 0.5,
+                   label = "All values near the reference \u2014 no strong drivers.",
+                   size = 5, color = "#888") +
+          theme_void()
+      )
+    }
+
+    ggplot(contribs, aes(x = variable, y = contribution, fill = direction)) +
+      geom_col(width = 0.65) +
+      geom_hline(yintercept = 0, linewidth = 0.5, color = "#333") +
+      geom_text(
+        aes(label = sprintf("%+.2f", contribution),
+            hjust = ifelse(contribution >= 0, -0.15, 1.15)),
+        size = 3.8, fontface = "bold", color = "#333"
+      ) +
+      coord_flip(clip = "off") +
+      scale_fill_manual(
+        values = c("Risk-increasing" = "#e76f51", "Protective" = "#2a9d8f"),
+        name = NULL
+      ) +
+      labs(x = NULL, y = "Contribution to raw score (vs. reference)") +
+      theme_minimal(base_size = 13) +
+      theme(
+        legend.position = "top",
+        legend.text = element_text(size = 11),
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text.y = element_text(size = 11, color = "#333", face = "bold"),
+        axis.text.x = element_text(size = 10, color = "#555"),
+        axis.title.x = element_text(size = 11, color = "#555",
+                                    margin = margin(t = 8)),
+        plot.margin = margin(5, 20, 5, 5)
+      )
   }, res = 96)
 
   # ---- Bulk scoring reactive ----
